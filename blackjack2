@@ -1,0 +1,250 @@
+use eframe::{egui, epi};
+use rand::{seq::SliceRandom, thread_rng};
+
+struct BlackjackApp {
+    deck: Vec<String>,
+    player_hands: Vec<Vec<String>>, // Supports splitting
+    dealer_hand: Vec<String>,
+    current_hand: usize, // Index of the current player hand being played
+    game_state: GameState,
+    player_bets: Vec<usize>, // Track bets for each hand
+    total_money: usize,
+}
+
+enum GameState {
+    Betting,
+    PlayerTurn,
+    DealerTurn,
+    GameOver(String), // GameOver state now includes a message
+}
+
+impl Default for BlackjackApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlackjackApp {
+    fn new() -> Self {
+        let mut app = BlackjackApp {
+            deck: Vec::new(),
+            player_hands: vec![Vec::new()],
+            dealer_hand: Vec::new(),
+            current_hand: 0,
+            game_state: GameState::Betting,
+            player_bets: vec![10], // Initial bet set to 10 for simplicity
+            total_money: 100, // Starting money
+        };
+        app.new_round();
+        app
+    }
+
+    fn create_deck() -> Vec<String> {
+        let suits = ["Hearts", "Diamonds", "Clubs", "Spades"];
+        let values = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+        let mut deck = Vec::new();
+
+        for &suit in suits.iter() {
+            for &value in values.iter() {
+                deck.push(format!("{} of {}", value, suit));
+            }
+        }
+
+        deck
+    }
+
+    fn can_split(hand: &[String]) -> bool {
+        if hand.len() != 2 {
+            return false;
+        }
+
+        let first_card_value = hand[0].split_whitespace().next().unwrap();
+        let second_card_value = hand[1].split_whitespace().next().unwrap();
+
+        first_card_value == second_card_value
+    }
+
+    fn new_round(&mut self) {
+        self.deck = Self::create_deck();
+        self.deck.shuffle(&mut thread_rng());
+        // Ensure the deck is not depleted when starting a new round
+        if self.deck.len() < 4 {
+            eprintln!("Deck depleted. Resetting deck.");
+            self.deck = Self::create_deck();
+            self.deck.shuffle(&mut thread_rng());
+        }
+        self.player_hands = vec![vec![self.deck.pop().unwrap(), self.deck.pop().unwrap()]];
+        self.dealer_hand = vec![self.deck.pop().unwrap(), self.deck.pop().unwrap()];
+        self.current_hand = 0;
+        self.game_state = GameState::PlayerTurn;
+    }
+
+    fn hit(&mut self) {
+        if let Some(card) = self.deck.pop() {
+            self.player_hands[self.current_hand].push(card);
+            if self.calculate_hand_value(&self.player_hands[self.current_hand]) > 21 {
+                self.player_hands[self.current_hand].push(String::from("BUST"));
+                self.stand(); // Automatically stand if busted
+            }
+        } else {
+            eprintln!("Deck depleted. Unable to draw more cards.");
+        }
+    }
+
+    fn stand(&mut self) {
+        if self.current_hand + 1 < self.player_hands.len() {
+            self.current_hand += 1; // Move to the next hand
+        } else {
+            self.game_state = GameState::DealerTurn; // Move to dealer's turn
+            self.dealer_turn(); // Dealer plays automatically
+        }
+    }
+
+    fn double_down(&mut self) {
+        if self.player_bets[self.current_hand] * 2 <= self.total_money {
+            self.total_money -= self.player_bets[self.current_hand]; // Deduct the doubled bet from total money
+            self.player_bets[self.current_hand] *= 2; // Double the bet
+            self.hit();
+            if !self.player_hands[self.current_hand].contains(&String::from("BUST")) {
+                self.stand();
+            }
+        } else {
+            eprintln!("Insufficient funds to double down.");
+        }
+    }
+
+    fn split(&mut self) {
+        if Self::can_split(&self.player_hands[self.current_hand]) && self.total_money >= self.player_bets[self.current_hand] {
+            let current_hand_cards = self.player_hands[self.current_hand].clone();
+            let card = current_hand_cards[0].clone();
+
+            // Check if there are enough cards in the deck to split
+            if self.deck.len() < 2 {
+                eprintln!("Not enough cards in the deck to split.");
+                return;
+            }
+
+            self.player_hands[self.current_hand] = vec![card.clone(), self.deck.pop().unwrap()];
+            self.player_hands.push(vec![card, self.deck.pop().unwrap()]);
+
+            let current_bet = self.player_bets[self.current_hand];
+            self.player_bets.push(current_bet);
+            self.total_money -= current_bet; // Deduct additional bet for splitting
+
+            self.game_state = GameState::PlayerTurn; // Ensure game state remains correct
+        } else {
+            eprintln!("Cannot split. Either the hand is not splittable or insufficient funds.");
+        }
+    }
+
+    fn dealer_turn(&mut self) {
+        while self.calculate_hand_value(&self.dealer_hand) < 17 {
+            if let Some(card) = self.deck.pop() {
+                self.dealer_hand.push(card);
+            } else {
+                eprintln!("Deck depleted. Dealer cannot draw more cards.");
+                break;
+            }
+        }
+        self.evaluate_game_outcomes();
+    }
+
+    fn calculate_hand_value(&self, hand: &[String]) -> usize {
+        let mut value = 0;
+        let mut aces = 0;
+
+        for card in hand.iter() {
+            let card_value = card.split_whitespace().next().unwrap();
+            match card_value {
+                "J" | "Q" | "K" => value += 10,
+                "A" => aces += 1,
+                _ => value += card_value.parse::<usize>().unwrap(),
+            }
+        }
+
+        for _ in 0..aces {
+            if value + 11 > 21 {
+                value += 1; // Use Ace as 1
+            } else {
+                value += 11; // Use Ace as 11
+            }
+        }
+
+        value
+    }
+
+    fn evaluate_game_outcomes(&mut self) {
+        let dealer_value = self.calculate_hand_value(&self.dealer_hand);
+        let dealer_bust = dealer_value > 21;
+        let mut message = String::from("Round Over: ");
+
+        for (index, hand) in self.player_hands.iter().enumerate() {
+            if hand.contains(&String::from("BUST")) {
+                message.push_str(&format!("Hand {} Busted. ", index + 1));
+                continue;
+            }
+
+            let hand_value = self.calculate_hand_value(hand);
+            if hand_value > 21 || (dealer_value <= 21 && dealer_value > hand_value) {
+                message.push_str(&format!("Hand {} Lost. ", index + 1));
+            } else if dealer_bust || hand_value > dealer_value {
+                message.push_str(&format!("Hand {} Won! ", index + 1));
+                self.total_money += self.player_bets[index] * 2; // Win double the bet
+            } else if hand_value == dealer_value {
+                message.push_str(&format!("Hand {} Push. ", index + 1));
+                self.total_money += self.player_bets[index]; // Return the bet
+            }
+        }
+
+        self.game_state = GameState::GameOver(message);
+    }
+}
+
+impl epi::App for BlackjackApp {
+    fn name(&self) -> &str {
+        "Blackjack"
+    }
+
+    fn update(&mut self, ctx: &egui::CtxRef, _frame: &mut epi::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(format!("Dealer's Hand: {:?}", self.dealer_hand));
+            for (index, hand) in self.player_hands.iter().enumerate() {
+                ui.label(format!("Hand {}: {:?}", index + 1, hand));
+                ui.label(format!("Bet: {}", self.player_bets[index]));
+            }
+
+            match &self.game_state {
+                GameState::Betting => {
+                    if ui.button("Place Bet and Start").clicked() {
+                        self.new_round();
+                    }
+                }
+                GameState::PlayerTurn => {
+                    if ui.button("Hit").clicked() {
+                        self.hit();
+                    }
+                    if ui.button("Stand").clicked() {
+                        self.stand();
+                    }
+                    if ui.button("Double Down").clicked() {
+                        self.double_down();
+                    }
+                    if self.player_hands[self.current_hand].len() == 2 && Self::can_split(&self.player_hands[self.current_hand]) {
+                        if ui.button("Split").clicked() {
+                            self.split();
+                        }
+                    }
+                }
+                GameState::DealerTurn => {
+                    ui.label("Dealer's turn...");
+                }
+                GameState::GameOver(message) => {
+                    ui.label(message);
+                    if ui.button("Play Again").clicked() {
+                        self.new_round();
+                    }
+                }
+            }
+        });
+    }
+}
